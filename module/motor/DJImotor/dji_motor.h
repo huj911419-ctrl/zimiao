@@ -36,6 +36,7 @@ typedef struct
     float angle_single_round; // 单圈角度
     float speed_aps;          // 角速度,单位为:度/秒
     int16_t real_current;     // 实际电流
+    int16_t torque_current_raw, speed_rpm_raw; /* Unfiltered signed CAN feedback; current units not converted. */
     uint8_t temperature;      // 温度 Celsius
 
     float total_angle;   // 总角度,注意方向
@@ -62,6 +63,14 @@ typedef struct
 
     // DaemonInstance* daemon;
     uint32_t feed_cnt;
+    uint32_t rx_count; // number of valid feedback frames decoded since boot
+    uint32_t last_rx_ms;
+    uint32_t last_command_ms;
+    uint32_t feedback_timeout_ms; /* 0 disables the opt-in watchdog */
+    uint32_t command_timeout_ms;
+    uint8_t watchdog_fault; /* latched until the application rearms explicitly */
+    int16_t last_set;  // last voltage/current command placed into the DJI CAN control frame
+    uint32_t tx_enqueue_ok, tx_enqueue_fail; /* HAL queue admission, not motor acknowledgement. */
     float dt;
 } DJIMotorInstance;
 

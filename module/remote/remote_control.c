@@ -11,21 +11,15 @@
 // 遥控器数据
 static RC_ctrl_t rc_ctrl[2];     //[0]:当前数据TEMP,[1]:上一次的数据LAST.用于按键持续按下和切换的判断
 static uint8_t rc_init_flag = 0; // 遥控器初始化标志位
+static volatile uint8_t rc_rx_valid = 0;
+static volatile uint32_t rc_last_rx_tick = 0;
+static Remote_Control_Diagnostics_s rc_diagnostics;
 
 // 遥控器拥有的串口实例,因为遥控器是单例,所以这里只有一个,就不封装了
 static USARTInstance *rc_usart_instance;
 // static DaemonInstance *rc_daemon_instance;
 
-/**
- * @brief 矫正遥控器摇杆的值,超过660或者小于-660的值都认为是无效值,置0
- *
- */
-static void RectifyRCjoystick()
-{
-    for (uint8_t i = 0; i < 5; ++i)
-        if (abs(*(&rc_ctrl[TEMP].rc.rocker_l_ + i)) > 660)
-            *(&rc_ctrl[TEMP].rc.rocker_l_ + i) = 0;
-}
+
 
 /**
  * @brief 遥控器数据解析
@@ -40,7 +34,7 @@ static void sbus_to_rc(const uint8_t *sbus_buf)
     rc_ctrl[TEMP].rc.rocker_l_ = (((sbus_buf[2] >> 6) | (sbus_buf[3] << 2) | (sbus_buf[4] << 10)) & 0x07ff) - RC_CH_VALUE_OFFSET; //!< Channel 2
     rc_ctrl[TEMP].rc.rocker_l1 = (((sbus_buf[4] >> 1) | (sbus_buf[5] << 7)) & 0x07ff) - RC_CH_VALUE_OFFSET;                       //!< Channel 3
     rc_ctrl[TEMP].rc.dial = ((sbus_buf[16] | (sbus_buf[17] << 8)) & 0x07FF) - RC_CH_VALUE_OFFSET;                                 // 左侧拨轮
-    RectifyRCjoystick();
+
     // 开关,0左1右
     rc_ctrl[TEMP].rc.switch_right = ((sbus_buf[5] >> 4) & 0x0003);     //!< Switch right
     rc_ctrl[TEMP].rc.switch_left = ((sbus_buf[5] >> 4) & 0x000C) >> 2; //!< Switch left
@@ -93,20 +87,54 @@ static void sbus_to_rc(const uint8_t *sbus_buf)
  */
 static void RemoteControlRxCallback()
 {
-    // DaemonReload(rc_daemon_instance);         // 先喂狗
+    const uint8_t *b = rc_usart_instance->recv_buff;
+    rc_diagnostics.last_length = rc_usart_instance->recv_len;
+    /* Discard fragments without decoding or refreshing the last-good deadline.
+     * A UART error can leave a short IDLE tail before the next complete frame.
+     * Keep the last validated command only within the existing 100 ms watchdog. */
+    if (rc_usart_instance->recv_len != REMOTE_CONTROL_FRAME_SIZE)
+    {
+        ++rc_diagnostics.bad_frames;
+        rc_diagnostics.bad_reason = 1U;
+        return;
+    }
+    uint16_t channel[5] = {
+        (b[0] | (b[1] << 8)) & 0x7ff,
+        ((b[1] >> 3) | (b[2] << 5)) & 0x7ff,
+        ((b[2] >> 6) | (b[3] << 2) | (b[4] << 10)) & 0x7ff,
+        ((b[4] >> 1) | (b[5] << 7)) & 0x7ff,
+        (b[16] | (b[17] << 8)) & 0x7ff,
+    };
+    /* A short IDLE frame or malformed switch must never refresh the watchdog. */
+    if (((b[5] >> 4) & 3U) == 0U || ((b[5] >> 6) & 3U) == 0U)
+    {
+        ++rc_diagnostics.bad_frames;
+        rc_diagnostics.bad_reason = 2U;
+        rc_rx_valid = 0U;
+        return;
+    }
+    if (b[12] > 1U || b[13] > 1U)
+    {
+        ++rc_diagnostics.bad_frames;
+        rc_diagnostics.bad_reason = 3U;
+        rc_rx_valid = 0U;
+        return;
+    }
+    for (uint8_t i = 0; i < 5U; ++i)
+        if (channel[i] < RC_CH_VALUE_MIN || channel[i] > RC_CH_VALUE_MAX)
+        {
+            ++rc_diagnostics.bad_frames;
+            rc_diagnostics.bad_reason = 4U;
+            rc_rx_valid = 0U;
+            return;
+        }
     sbus_to_rc(rc_usart_instance->recv_buff); // 进行协议解析
+    rc_last_rx_tick = HAL_GetTick();
+    ++rc_diagnostics.good_frames;
+    rc_rx_valid = 1;
 }
 
-/**
- * @brief 遥控器离线的回调函数,注册到守护进程中,串口掉线时调用
- *
- */
-static void RCLostCallback(void *id)
-{
-    memset(rc_ctrl, 0, sizeof(rc_ctrl)); // 清空遥控器数据
-    USARTServiceInit(rc_usart_instance); // 尝试重新启动接收
-    LOGWARNING("[rc] remote control lost");
-}
+
 
 RC_ctrl_t *RemoteControlInit(UART_HandleTypeDef *rc_usart_handle)
 {
@@ -128,10 +156,50 @@ RC_ctrl_t *RemoteControlInit(UART_HandleTypeDef *rc_usart_handle)
     return rc_ctrl;
 }
 
-// 由于暂时没有启用Daemon,所以该函数暂时无效
 uint8_t RemoteControlIsOnline()
 {
-    // if (rc_init_flag)
-    //     return DaemonIsOnline(rc_daemon_instance);
-    return 0;
+    /*
+     * DT7/DR16 normally refreshes at about 70 Hz. 100 ms without a complete
+     * frame is treated as offline. Unsigned subtraction is wrap-safe.
+     */
+    if (!rc_init_flag || !rc_rx_valid)
+        return 0;
+
+    return ((uint32_t)(HAL_GetTick() - rc_last_rx_tick) <= 100U) ? 1U : 0U;
+}
+
+uint8_t RemoteControlGetSnapshot(RC_ctrl_t *sample)
+{
+    return RemoteControlGetSnapshotWithAge(sample, NULL);
+}
+
+uint8_t RemoteControlGetSnapshotWithAge(RC_ctrl_t *sample, uint32_t *age_ms)
+{
+    if (sample == NULL) return 0U;
+    if (rc_init_flag) USARTEnsureReceive(rc_usart_instance);
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    uint8_t online = RemoteControlIsOnline();
+    memcpy(sample, &rc_ctrl[TEMP], sizeof(*sample));
+    if (age_ms) *age_ms = (uint32_t)(HAL_GetTick() - rc_last_rx_tick);
+    __set_PRIMASK(primask);
+    return online;
+}
+
+void RemoteControlGetDiagnostics(Remote_Control_Diagnostics_s *diagnostics)
+{
+    if (!diagnostics) return;
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    *diagnostics = rc_diagnostics;
+    diagnostics->age_ms = (uint32_t)(HAL_GetTick() - rc_last_rx_tick);
+    diagnostics->online = RemoteControlIsOnline();
+    if (rc_usart_instance)
+    {
+        diagnostics->uart_errors = rc_usart_instance->error_count;
+        diagnostics->last_uart_error = rc_usart_instance->last_error;
+        diagnostics->receive_retries = rc_usart_instance->receive_retries;
+        diagnostics->start_failures = rc_usart_instance->start_failures;
+    }
+    __set_PRIMASK(primask);
 }

@@ -154,13 +154,19 @@ static void DecodeDJIMotor(CANInstance *_instance)
     DJIMotorInstance *motor = (DJIMotorInstance *)_instance->id;
     DJI_Motor_Measure_s *measure = &motor->measure; // measure要多次使用,保存指针减小访存开销
 
+    if (_instance->rx_len != 8U || (((uint16_t)rxbuff[0] << 8) | rxbuff[1]) >= 8192U)
+        return;
+
     // DaemonReload(motor->daemon);
     motor->dt = DWT_GetDeltaT(&motor->feed_cnt);
 
     // 解析数据并对电流和速度进行滤波,电机的反馈报文具体格式见电机说明手册
     measure->last_ecd = measure->ecd;
     measure->ecd = ((uint16_t)rxbuff[0]) << 8 | rxbuff[1];
+    if (motor->rx_count == 0U) measure->last_ecd = measure->ecd;
     measure->angle_single_round = ECD_ANGLE_COEF_DJI * (float)measure->ecd;
+    measure->speed_rpm_raw = (int16_t)(((uint16_t)rxbuff[2] << 8) | rxbuff[3]);
+    measure->torque_current_raw = (int16_t)(((uint16_t)rxbuff[4] << 8) | rxbuff[5]);
     measure->speed_aps = (1.0f - SPEED_SMOOTH_COEF) * measure->speed_aps +
                          RPM_2_ANGLE_PER_SEC * SPEED_SMOOTH_COEF * (float)((int16_t)(rxbuff[2] << 8 | rxbuff[3]));
     measure->real_current = (1.0f - CURRENT_SMOOTH_COEF) * measure->real_current +
@@ -173,6 +179,8 @@ static void DecodeDJIMotor(CANInstance *_instance)
     else if (measure->ecd - measure->last_ecd < -4096)
         measure->total_round++;
     measure->total_angle = measure->total_round * 360 + measure->angle_single_round;
+    motor->last_rx_ms = HAL_GetTick();
+    motor->rx_count++;
 }
 
 static void DJIMotorLostCallback(void *motor_ptr)
@@ -254,6 +262,7 @@ void DJIMotorOuterLoop(DJIMotorInstance *motor, Closeloop_Type_e outer_loop)
 void DJIMotorSetRef(DJIMotorInstance *motor, float ref)
 {
     motor->motor_controller.pid_ref = ref;
+    motor->last_command_ms = HAL_GetTick();
 }
 
 // 为所有电机实例计算三环PID,发送控制报文
@@ -316,8 +325,28 @@ void DJIMotorControl()
         if (motor_setting->feedback_reverse_flag == FEEDBACK_DIRECTION_REVERSE)
             pid_ref *= -1;
 
-        // 获取最终输出
+        uint32_t now_ms = HAL_GetTick();
+        if (motor->stop_flag == MOTOR_ENALBED &&
+            ((motor->feedback_timeout_ms && (!motor->rx_count ||
+              (uint32_t)(now_ms - motor->last_rx_ms) > motor->feedback_timeout_ms)) ||
+             (motor->command_timeout_ms &&
+              (uint32_t)(now_ms - motor->last_command_ms) > motor->command_timeout_ms)))
+            motor->watchdog_fault = 1U;
+        /* Clamp before conversion, including nonfinite values from an upstream controller. */
+        if (!isfinite(pid_ref))
+        {
+            pid_ref = 0.0f;
+            motor->watchdog_fault = 1U;
+        }
+        float command_limit = motor->motor_type == GM6020 ? 30000.0f : 16384.0f;
+        LIMIT_MIN_MAX(pid_ref, -command_limit, command_limit);
         set = (int16_t)pid_ref;
+
+        // 若该电机处于停止状态,直接输出0
+        if (motor->stop_flag == MOTOR_STOP || motor->watchdog_fault)
+            set = 0;
+
+        motor->last_set = set;
 
         // 分组填入发送数据
         group = motor->sender_group;
@@ -325,17 +354,23 @@ void DJIMotorControl()
         sender_assignment[group].tx_buff[2 * num] = (uint8_t)(set >> 8);         // 低八位
         sender_assignment[group].tx_buff[2 * num + 1] = (uint8_t)(set & 0x00ff); // 高八位
 
-        // 若该电机处于停止状态,直接将buff置零
-        if (motor->stop_flag == MOTOR_STOP)
-            memset(sender_assignment[group].tx_buff + 2 * num, 0, sizeof(uint16_t));
+        // stop状态已经在上面把set置0，此处无需再次覆盖
     }
 
     // 遍历flag,检查是否要发送这一帧报文
+    HAL_StatusTypeDef tx_status[DJI_MOTOR_SENDER_GROUP_CNT];
     for (size_t i = 0; i < DJI_MOTOR_SENDER_GROUP_CNT; ++i)
     {
         if (sender_enable_flag[i])
         {
-            CANTransmit(&sender_assignment[i], 1);
+            tx_status[i] = CANTransmit(&sender_assignment[i], 1);
         }
+    }
+    for (size_t i = 0; i < idx; ++i)
+    {
+        DJIMotorInstance *motor = dji_motor_instance[i];
+        if (!sender_enable_flag[motor->sender_group]) continue;
+        if (tx_status[motor->sender_group] == HAL_OK) ++motor->tx_enqueue_ok;
+        else ++motor->tx_enqueue_fail;
     }
 }

@@ -19,6 +19,7 @@ SPIInstance *SPIRegister(SPI_Init_Config_s *conf)
     instance->GPIOx = conf->GPIOx;
     instance->cs_pin = conf->cs_pin;
     instance->spi_work_mode = conf->spi_work_mode;
+    instance->transfer_timeout_ms = 1000U;
     instance->callback = conf->callback;
     instance->id = conf->id;
     if (instance->spi_handle->Instance == SPI1)
@@ -116,13 +117,13 @@ void SPITransRecv(SPIInstance *spi_ins, uint8_t *ptr_data_rx, uint8_t *ptr_data_
     switch (spi_ins->spi_work_mode)
     {
     case SPI_DMA_MODE:
-        HAL_SPI_TransmitReceive_DMA(spi_ins->spi_handle, ptr_data_tx, ptr_data_rx, len);
+        spi_ins->last_status = HAL_SPI_TransmitReceive_DMA(spi_ins->spi_handle, ptr_data_tx, ptr_data_rx, len);
         break;
     case SPI_IT_MODE:
-        HAL_SPI_TransmitReceive_IT(spi_ins->spi_handle, ptr_data_tx, ptr_data_rx, len);
+        spi_ins->last_status = HAL_SPI_TransmitReceive_IT(spi_ins->spi_handle, ptr_data_tx, ptr_data_rx, len);
         break;
     case SPI_BLOCK_MODE:
-        HAL_SPI_TransmitReceive(spi_ins->spi_handle, ptr_data_tx, ptr_data_rx, len, 1000); // 默认50ms超时
+        spi_ins->last_status = HAL_SPI_TransmitReceive(spi_ins->spi_handle, ptr_data_tx, ptr_data_rx, len, spi_ins->transfer_timeout_ms);
         // 阻塞模式不会调用回调函数,传输完成后直接拉高片选结束
         HAL_GPIO_WritePin(spi_ins->GPIOx, spi_ins->cs_pin, GPIO_PIN_SET);
         *spi_ins->cs_pin_state =

@@ -55,6 +55,7 @@ typedef struct
     float temperature; // 温度
     // 标定数据
     float gyro_offset[3]; // 陀螺仪零偏
+    uint8_t calibration_valid; // online calibration completed without fallback
     float gNorm;          // 重力加速度模长,从标定获取
     float acc_coef;       // 加速度计原始数据转换系数
     // 传感器灵敏度,用于计算实际值(regNdef.h中定义)

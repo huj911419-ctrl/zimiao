@@ -1,62 +1,28 @@
-// app
-#include "2yaw_gimbal.h"
-#include "agv_chassis.h"
+/** @file robot.c @brief Manual GM6020 gimbal bring-up entry point. */
 #include "robot.h"
-// #include "vtm_cmd.h"
-#include "auto_cmd.h"
-#include "auto_ammo_booster.h"
-
-// module
-#include "daemon.h"
-#include "ins_task.h"
 #include "robot_task.h"
-#include "vision_26.h"
-
-// bsp
-#include "bsp_init.h"
-
+#include "gimbal_runtime.h"
+#include "gimbal_imu_uart.h"
+#include "gimbal_manual_config.h"
+#include "ins_task.h"
 #include "iwdg.h"
 
-void RobotInit()
+void RobotInit(void)
 {
-    uint32_t primask = __get_PRIMASK();
-    __disable_irq();
-    BSPInit();
-    VTMCMDInit();
-    // AUTOCMDInit();
-    AGVChassisInit();
-    // GimbalInit();
-    // ShootInit();
+    GimbalRuntimeInit();
+    GimbalImuUartInit();
     RobotOSTaskInit();
-    HAL_GPIO_WritePin(POWER_24V_2_GPIO_Port, POWER_24V_2_Pin, GPIO_PIN_SET);
-    // __enable_irq();
-    __set_PRIMASK(primask);
 }
-
-void RobotControlTask()
+void RobotControlTask(void) { GimbalRuntimeControl(); }
+void RobotSensorTask(void)
 {
-    VTMCMDTask();
-    // AUTOCMDTask();
-    AGVChassisTask();
-    // GimbalTask();
-    // ShootTask();
+#if GIMBAL_BRINGUP_ENABLE_IMU
+    INS_Task();
+#endif
 }
-
-void RobotSensorTask()
+void RobotCommTask(void)
 {
-    // INS_Task();
-    // GimbalDataTask();
+    GimbalRuntimeComm();
+    GimbalImuUartTask();
 }
-
-void RobotCommTask()
-{
-    // RefereeTask();
-    // VisionTask();
-    // SuperCapTask();
-}
-
-void RobotWDTTask()
-{
-    // DaemonTask();
-    HAL_IWDG_Refresh(&hiwdg1);
-}
+void RobotWDTTask(void) { HAL_IWDG_Refresh(&hiwdg1); }

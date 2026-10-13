@@ -25,8 +25,10 @@ typedef struct
 {
     uint8_t *recv_buff;                    // 模块接收数据的buffer指针
     uint8_t recv_buff_size;                // 模块接收一包数据的大小
+    uint16_t recv_len;                     // actual bytes in the current DMA/IDLE callback
     UART_HandleTypeDef *usart_handle;      // 实例对应的usart_handle
     usart_module_callback module_callback; // 解析收到的数据的回调函数
+    volatile uint32_t error_count, last_error, start_failures, receive_retries;
 } USARTInstance;
 
 /* usart 初始化配置结构体 */
@@ -50,6 +52,8 @@ USARTInstance *USARTRegister(USART_Init_Config_s *init_config);
  * @param _instance
  */
 void USARTServiceInit(USARTInstance *_instance);
+/** @brief Task-context retry only when UART and DMA receive engines are idle. */
+void USARTEnsureReceive(USARTInstance *instance);
 
 
 /**

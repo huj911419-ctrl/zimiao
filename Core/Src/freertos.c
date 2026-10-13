@@ -137,8 +137,11 @@ void MX_FREERTOS_Init(void) {
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void const * argument)
 {
-  /* init code for USB_DEVICE */
-  MX_USB_DEVICE_Init();
+  /*
+   * USB CDC is initialized in main() before RobotInit(), so do not initialize
+   * it a second time here. Reinitializing an active USB device can make the
+   * virtual COM port disappear/re-enumerate unpredictably.
+   */
   /* USER CODE BEGIN StartDefaultTask */
   osThreadTerminate(NULL); // 避免空置和切换占用cpu
   /* Infinite loop */

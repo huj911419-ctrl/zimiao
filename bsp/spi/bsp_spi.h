@@ -22,6 +22,8 @@ typedef struct spi_ins_temp
     uint16_t cs_pin;               // 片选信号对应的引脚号,GPIO_PIN_1,GPIO_PIN_2等等
 
     SPI_TXRX_MODE_e spi_work_mode; // 传输工作模式
+    HAL_StatusTypeDef last_status; // status of the latest transfer/start
+    uint32_t transfer_timeout_ms; // blocking full-duplex timeout; default 1000 ms
     uint8_t rx_size;               // 本次接收的数据长度
     uint8_t *rx_buffer;            // 本次接收的数据缓冲区
     uint8_t CS_State;              // 片选信号状态,用于中断模式下的片选控制

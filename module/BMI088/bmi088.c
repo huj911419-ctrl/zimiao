@@ -14,7 +14,7 @@
  * @param dataptr 读取到的数据存放的指针
  * @param len 读取长度
  */
-static void BMI088AccelRead(BMI088Instance *bmi088, uint8_t reg, uint8_t *dataptr, uint8_t len)
+static uint8_t BMI088AccelRead(BMI088Instance *bmi088, uint8_t reg, uint8_t *dataptr, uint8_t len)
 {
     if (len > 6)
         while (1)
@@ -24,7 +24,9 @@ static void BMI088AccelRead(BMI088Instance *bmi088, uint8_t reg, uint8_t *datapt
     static uint8_t rx[8]; // 前两个字节是dummy data,第三个开始是真正的数据
     tx[0] = 0x80 | reg;   // 静态变量每次进来还是上次的值,所以要每次都要给tx[0]赋值0x80
     SPITransRecv(bmi088->spi_acc, rx, tx, len + 2);
+    if (bmi088->spi_acc->last_status != HAL_OK) return 0U;
     memcpy(dataptr, rx + 2, len); // @todo : memcpy有额外开销,后续可以考虑优化,在SPI中加入接口或模式,使得在一次传输结束后不释放CS,直接接着传输
+    return 1U;
 }
 
 /**
@@ -35,7 +37,7 @@ static void BMI088AccelRead(BMI088Instance *bmi088, uint8_t reg, uint8_t *datapt
  * @param dataptr 读取到的数据存放的指针
  * @param len 读取长度
  */
-static void BMI088GyroRead(BMI088Instance *bmi088, uint8_t reg, uint8_t *dataptr, uint8_t len)
+static uint8_t BMI088GyroRead(BMI088Instance *bmi088, uint8_t reg, uint8_t *dataptr, uint8_t len)
 {
     if (len > 6)
         while (1)
@@ -46,7 +48,9 @@ static void BMI088GyroRead(BMI088Instance *bmi088, uint8_t reg, uint8_t *dataptr
     
     tx[0] = 0x80 | reg;
     SPITransRecv(bmi088->spi_gyro, rx, tx, len + 1);
+    if (bmi088->spi_gyro->last_status != HAL_OK) return 0U;
     memcpy(dataptr, rx + 1, len); // @todo : memcpy有额外开销,后续可以考虑优化,在SPI中加入接口或模式,使得在一次传输结束后不释放CS,直接接着传输
+    return 1U;
 }
 
 /**
@@ -255,14 +259,20 @@ uint8_t BMI088Acquire(BMI088Instance *bmi088, BMI088_Data_t *data_store)
     if (bmi088->work_mode == BMI088_BLOCK_PERIODIC_MODE)
     {
         static uint8_t buf[6] = {0}; // 最多读取6个byte(gyro/acc,temp是2)
+        /* A floating/disconnected SPI bus can return HAL_OK with 0x00/0xff data. */
+        uint8_t whoami = 0U;
+        if (!BMI088AccelRead(bmi088, BMI088_ACC_CHIP_ID, &whoami, 1) || whoami != BMI088_ACC_CHIP_ID_VALUE)
+            return 0U;
+        if (!BMI088GyroRead(bmi088, BMI088_GYRO_CHIP_ID, &whoami, 1) || whoami != BMI088_GYRO_CHIP_ID_VALUE)
+            return 0U;
         // 读取accel的x轴数据首地址,bmi088内部自增读取地址 // 3* sizeof(int16_t)
-        BMI088AccelRead(bmi088, BMI088_ACCEL_XOUT_L, buf, 6);
+        if (!BMI088AccelRead(bmi088, BMI088_ACCEL_XOUT_L, buf, 6)) return 0U;
         for (uint8_t i = 0; i < 3; i++)
             data_store->acc[i] = bmi088->acc_coef * (float)(int16_t)(((buf[2 * i + 1]) << 8) | buf[2 * i]);
-        BMI088GyroRead(bmi088, BMI088_GYRO_X_L, buf, 6); // 连续读取3个(3*2=6)轴的角速度
+        if (!BMI088GyroRead(bmi088, BMI088_GYRO_X_L, buf, 6)) return 0U;
         for (uint8_t i = 0; i < 3; i++)
             data_store->gyro[i] = bmi088->BMI088_GYRO_SEN * (float)(int16_t)(((buf[2 * i + 1]) << 8) | buf[2 * i]);
-        BMI088AccelRead(bmi088, BMI088_TEMP_M, buf, 2); // 读温度,温度传感器在accel上
+        if (!BMI088AccelRead(bmi088, BMI088_TEMP_M, buf, 2)) return 0U;
         data_store->temperature = (float)(int16_t)(((buf[0] << 3) | (buf[1] >> 5))) * BMI088_TEMP_FACTOR + BMI088_TEMP_OFFSET;
 
         return 1;
@@ -312,6 +322,9 @@ uint8_t BMI088Acquire(BMI088Instance *bmi088, BMI088_Data_t *data_store)
  */
 void BMI088CalibrateIMU(BMI088Instance *_bmi088)
 {
+    _bmi088->calibration_valid = 0U;
+    _bmi088->acc_coef = BMI088_ACCEL_6G_SEN;
+    _bmi088->BMI088_GYRO_SEN = BMI088_GYRO_2000_SEN;
     if (_bmi088->cali_mode == BMI088_CALIBRATE_ONLINE_MODE) // 性感bmi088在线标定,耗时6s
     {
         _bmi088->acc_coef = BMI088_ACCEL_6G_SEN;         // 标定完后要乘以9.805/gNorm
@@ -323,7 +336,7 @@ void BMI088CalibrateIMU(BMI088Instance *_bmi088)
         float gNormTemp, gNormMax, gNormMin; // 同上,计算矢量范数(模长)
         float gyroDiff[3], gNormDiff;        // 每个轴的最大角速度跨度及其模长
 
-        BMI088_Data_t raw_data;
+        BMI088_Data_t raw_data = {0};
         startTime = DWT_GetTimeline_s();
         // 循环继续的条件为标定环境不满足
         do // 用do while至少执行一次,省得对上面的参数进行初始化
@@ -342,7 +355,12 @@ void BMI088CalibrateIMU(BMI088Instance *_bmi088)
             // @todo : 这里也有获取bmi088数据的操作,后续与BMI088Acquire合并.注意标定时的工作模式是阻塞,且offset和acc_coef要初始化成0和1,标定完成后再设定为标定值
             for (uint16_t i = 0; i < CaliTimes; ++i) // 提前计算,优化
             {
-                BMI088Acquire(_bmi088, &raw_data);
+                if (!BMI088Acquire(_bmi088, &raw_data))
+                {
+                    gNormDiff = 100.0f;
+                    gyroDiff[0] = gyroDiff[1] = gyroDiff[2] = 100.0f;
+                    break;
+                }
                 gNormTemp = NormOf3d(raw_data.acc);
                 _bmi088->gNorm += gNormTemp; // 计算范数并累加,最后除以calib times获取单次值
                 for (uint8_t ii = 0; ii < 3; ii++)
@@ -363,8 +381,8 @@ void BMI088CalibrateIMU(BMI088Instance *_bmi088)
                     gNormMin = gNormMin < gNormTemp ? gNormMin : gNormTemp;
                     for (uint8_t j = 0; j < 3; ++j)
                     {
-                        gyroMax[j] = gyroMax[j] > _bmi088->gyro[j] ? gyroMax[j] : _bmi088->gyro[j];
-                        gyroMin[j] = gyroMin[j] < _bmi088->gyro[j] ? gyroMin[j] : _bmi088->gyro[j];
+                        gyroMax[j] = gyroMax[j] > raw_data.gyro[j] ? gyroMax[j] : raw_data.gyro[j];
+                        gyroMin[j] = gyroMin[j] < raw_data.gyro[j] ? gyroMin[j] : raw_data.gyro[j];
                     }
                 }
 
@@ -402,6 +420,7 @@ void BMI088CalibrateIMU(BMI088Instance *_bmi088)
         _bmi088->gyro_offset[2] = BMI088_PRE_CALI_ACC_Z_OFFSET;
         _bmi088->gNorm = BMI088_PRE_CALI_G_NORM;
     }
+    _bmi088->calibration_valid = (_bmi088->cali_mode == BMI088_CALIBRATE_ONLINE_MODE);
     _bmi088->acc_coef *= 9.805 / _bmi088->gNorm;
 }
 
@@ -440,6 +459,8 @@ BMI088Instance *BMI088Register(BMI088_Init_Config_s *config)
     // 根据参数选择工作模式
     bmi088_instance->spi_acc = SPIRegister(&config->spi_acc_config);
     bmi088_instance->spi_gyro = SPIRegister(&config->spi_gyro_config);
+    bmi088_instance->spi_acc->transfer_timeout_ms = 2U;
+    bmi088_instance->spi_gyro->transfer_timeout_ms = 2U;
     bmi088_instance->heat_pwm = PWMRegister(&config->heat_pwm_config);
     PIDInit(&bmi088_instance->heat_pid, &config->heat_pid_config);
 
@@ -453,6 +474,7 @@ BMI088Instance *BMI088Register(BMI088_Init_Config_s *config)
         // 可以增加try out times,超出次数则返回错误
     } while (error != 0);
 
+    bmi088_instance->cali_mode = config->cali_mode;
     bmi088_instance->work_mode = BMI088_BLOCK_PERIODIC_MODE; // 临时设置为阻塞模式
     BMI088CalibrateIMU(bmi088_instance);                     // 标定acc和gyro
     bmi088_instance->work_mode = config->work_mode;          // 恢复工作模式

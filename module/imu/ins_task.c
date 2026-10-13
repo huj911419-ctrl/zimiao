@@ -16,12 +16,24 @@
 #include "QuaternionEKF.h"
 #include "user_lib.h"
 #include "general_def.h"
+#include "bsp_dwt.h"
+#include <string.h>
 // #include "master_process.h"
 
 static INS_t INS;
 static IMU_Param_t IMU_Param;
 static BMI088Instance *bmi088;
 static BMI088_Data_t bmi088_data;
+static float sensor_gyro[3], sensor_accel[3];
+
+/*
+ * Published snapshot for the future C-board -> vision link.
+ * snapshot_guard implements a tiny seqlock so the comm task never observes
+ * half-updated quaternion/gyro/timestamp fields.
+ */
+static INS_Vision_Snapshot_t vision_snapshot;
+static volatile uint32_t snapshot_guard;
+static uint32_t vision_sample_seq;
 
 const float xb[3] = {1, 0, 0};
 const float yb[3] = {0, 1, 0};
@@ -33,6 +45,54 @@ static float dt = 0, t = 0;
 static float RefTemp = 40; // 恒温设定温度
 
 static void IMU_Param_Correction(IMU_Param_t *param, float gyro[3], float accel[3]);
+
+static void PublishVisionSnapshot(void)
+{
+    static float last_q[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    static uint8_t last_q_valid = 0;
+    float q_out[4];
+    float dot = 0.0f;
+
+    memcpy(q_out, INS.q, sizeof(q_out));
+
+    /*
+     * q and -q describe the same attitude. Force sign continuity so a future
+     * upper-computer SLERP does not see an artificial 360-degree jump.
+     */
+    if (last_q_valid)
+    {
+        for (uint8_t i = 0; i < 4; ++i)
+            dot += q_out[i] * last_q[i];
+
+        if (dot < 0.0f)
+        {
+            for (uint8_t i = 0; i < 4; ++i)
+                q_out[i] = -q_out[i];
+        }
+    }
+
+    memcpy(last_q, q_out, sizeof(last_q));
+    last_q_valid = 1;
+
+    snapshot_guard++;
+    __DMB();
+
+    memcpy(vision_snapshot.q, q_out, sizeof(vision_snapshot.q));
+    memcpy(vision_snapshot.gyro, INS.Gyro, sizeof(vision_snapshot.gyro));
+    memcpy(vision_snapshot.sensor_gyro, sensor_gyro, sizeof(sensor_gyro));
+    memcpy(vision_snapshot.sensor_accel, sensor_accel, sizeof(sensor_accel));
+    vision_snapshot.yaw = INS.Yaw;
+    vision_snapshot.pitch = INS.Pitch;
+    vision_snapshot.roll = INS.Roll;
+    vision_snapshot.timestamp_us = (uint32_t)DWT_GetTimeline_us();
+    vision_snapshot.timestamp_ms = HAL_GetTick();
+    vision_snapshot.sample_seq = ++vision_sample_seq;
+    vision_snapshot.valid = 1U;
+    vision_snapshot.calibrated = bmi088->calibration_valid;
+
+    __DMB();
+    snapshot_guard++;
+}
 
 // 使用加速度计的数据初始化Roll和Pitch,而Yaw置0,这样可以避免在初始时候的姿态估计误差
 static void InitQuaternion(float *init_q4)
@@ -52,14 +112,52 @@ static void InitQuaternion(float *init_q4)
     }
     for (uint8_t i = 0; i < 3; ++i)
         acc_init[i] /= 100;
+    float zero_gyro[3] = {0};
+    IMU_Param_Correction(&IMU_Param, zero_gyro, acc_init);
     Norm3d(acc_init);
+
     // 计算原始加速度矢量和导航系重力加速度矢量的夹角
-    float angle = acosf(Dot3d(acc_init, gravity_norm));
+    float gravity_dot = Dot3d(acc_init, gravity_norm);
+    if (gravity_dot > 1.0f)
+        gravity_dot = 1.0f;
+    else if (gravity_dot < -1.0f)
+        gravity_dot = -1.0f;
+
+    float angle = acosf(gravity_dot);
     Cross3d(acc_init, gravity_norm, axis_rot);
-    Norm3d(axis_rot);
+
+    /*
+     * 板子接近水平放置时叉乘轴长度可能接近0。原实现直接 Norm3d()
+     * 会产生 NaN，进而污染整个 EKF。接近平行时直接使用单位四元数。
+     */
+    float axis_len = NormOf3d(axis_rot);
+    if (axis_len < 1e-6f || angle < 1e-6f)
+    {
+        /* Anti-parallel gravity needs a half turn, not the identity. */
+        init_q4[0] = gravity_dot < 0.0f ? 0.0f : 1.0f;
+        init_q4[1] = gravity_dot < 0.0f ? 1.0f : 0.0f;
+        init_q4[2] = 0.0f;
+        init_q4[3] = 0.0f;
+        return;
+    }
+
+    axis_rot[0] /= axis_len;
+    axis_rot[1] /= axis_len;
+    axis_rot[2] /= axis_len;
+
     init_q4[0] = cosf(angle / 2.0f);
-    for (uint8_t i = 0; i < 2; ++i)
-        init_q4[i + 1] = axis_rot[i] * sinf(angle / 2.0f); // 轴角公式,第三轴为0(没有z轴分量)
+    init_q4[1] = axis_rot[0] * sinf(angle / 2.0f);
+    init_q4[2] = axis_rot[1] * sinf(angle / 2.0f);
+    init_q4[3] = axis_rot[2] * sinf(angle / 2.0f);
+}
+
+void INS_SetMounting(float yaw, float pitch, float roll)
+{
+    if (INS.init) return;
+    IMU_Param.Yaw = yaw;
+    IMU_Param.Pitch = pitch;
+    IMU_Param.Roll = roll;
+    IMU_Param.flag = 1U;
 }
 
 attitude_t *INS_Init(void)
@@ -110,9 +208,6 @@ attitude_t *INS_Init(void)
     IMU_Param.scale[X] = 1;
     IMU_Param.scale[Y] = 1;
     IMU_Param.scale[Z] = 1;
-    IMU_Param.Yaw = 0;
-    IMU_Param.Pitch = 0;
-    IMU_Param.Roll = 0;
     IMU_Param.flag = 1;
 
     float init_quaternion[4] = {0};
@@ -138,14 +233,19 @@ void INS_Task(void)
     // ins update
     if ((count % 1) == 0)
     {
-        BMI088Acquire(bmi088, &bmi088_data);
+        if (!BMI088Acquire(bmi088, &bmi088_data) || !isfinite(dt) || dt <= 0.0f || dt > 0.02f)
+            return; /* do not publish a fresh timestamp for failed sensor reads */
 
         INS.Accel[X] = bmi088_data.acc[X];
         INS.Accel[Y] = bmi088_data.acc[Y];
         INS.Accel[Z] = bmi088_data.acc[Z];
-        INS.Gyro[X] = bmi088_data.gyro[X];
-        INS.Gyro[Y] = bmi088_data.gyro[Y];
-        INS.Gyro[Z] = bmi088_data.gyro[Z];
+        INS.Gyro[X] = bmi088_data.gyro[X] - bmi088->gyro_offset[X];
+        INS.Gyro[Y] = bmi088_data.gyro[Y] - bmi088->gyro_offset[Y];
+        INS.Gyro[Z] = bmi088_data.gyro[Z] - bmi088->gyro_offset[Z];
+
+        /* Keep sensor axes for mount identification without changing INS inputs. */
+        memcpy(sensor_gyro, INS.Gyro, sizeof(sensor_gyro));
+        memcpy(sensor_accel, INS.Accel, sizeof(sensor_accel));
 
         // demo function,用于修正安装误差,可以不管,本demo暂时没用
         IMU_Param_Correction(&IMU_Param, INS.Gyro, INS.Accel);
@@ -178,6 +278,8 @@ void INS_Task(void)
         INS.Roll = QEKF_INS.Roll;
         INS.YawTotalAngle = QEKF_INS.YawTotalAngle;
 
+        PublishVisionSnapshot();
+
         // VisionSetAltitude(INS.Yaw, INS.Pitch, INS.Roll);
     }
 
@@ -192,6 +294,27 @@ void INS_Task(void)
     {
         // 1Hz 可以加入monitor函数,检查IMU是否正常运行/离线
     }
+}
+
+uint8_t INS_GetVisionSnapshot(INS_Vision_Snapshot_t *snapshot)
+{
+    if (snapshot == NULL)
+        return 0U;
+    /* Bounded read: a preempted writer must not make a higher-priority reader spin. */
+    for (uint8_t attempt = 0U; attempt < 3U; ++attempt)
+    {
+        uint32_t guard_before = snapshot_guard;
+        if (guard_before & 1U)
+            continue;
+
+        __DMB();
+        memcpy(snapshot, &vision_snapshot, sizeof(*snapshot));
+        __DMB();
+
+        uint32_t guard_after = snapshot_guard;
+        if (guard_before == guard_after && !(guard_after & 1U)) return snapshot->valid;
+    }
+    return 0U;
 }
 
 /**

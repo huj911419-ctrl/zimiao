@@ -1,92 +1,69 @@
-// app
-#include "robot_def.h"
+/** @file dt7_cmd.c @brief Validated DT7 input -> rad/s gimbal command mailbox. */
 #include "dt7_cmd.h"
-
-// module
-#include "remote_control.h"
+#include "2yaw_gimbal.h"
+#include "gimbal_manual_config.h"
 #include "message_center.h"
-#include "general_def.h"
+#include "remote_control.h"
+#include "gimbal_key_mouse_config.h"
+#if GIMBAL_KEY_MOUSE_ENABLED
+#include "gimbal_key_mouse.h"
+static Gimbal_Key_Mouse_s key_mouse;
+#endif
+#include <math.h>
+#include <string.h>
 
-// bsp
-#include "bsp_dwt.h"
-#include "bsp_log.h"
+static Publisher_t *gimbal_cmd_pub;
 
-static Publisher_t *chassis_cmd_pub;   // 底盘控制消息发布者
-static Subscriber_t *chassis_feed_sub; // 底盘反馈信息订阅者
-static Chassis_Ctrl_Cmd_s chassis_cmd_send;      // 发送给底盘应用的信息
-static Chassis_Upload_Data_s chassis_fetch_data;   // 从底盘应用接收的反馈信息
-
-static Publisher_t *gimbal_cmd_pub;            // 云台控制消息发布者
-static Gimbal_Ctrl_Cmd_s gimbal_cmd_send;      // 传递给云台的控制信息
-
-static Publisher_t *shoot_cmd_pub;           // 发射控制消息发布者
-static Shoot_Ctrl_Cmd_s shoot_cmd_send;      // 传递给发射的控制信息
-
-static RC_ctrl_t *rc_data; // 遥控器数据,初始化时返回
-
-
-
-void RobotCMDInit()
+#if !GIMBAL_KEY_MOUSE_ENABLED
+static float StickRate(int16_t value, float maximum)
 {
-    rc_data = RemoteControlInit(&huart5);
-    chassis_cmd_pub = PubRegister("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
-    chassis_feed_sub = SubRegister("chassis_feed", sizeof(Chassis_Upload_Data_s));
-    gimbal_cmd_pub = PubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
-    shoot_cmd_pub = PubRegister("shoot_cmd", sizeof(Shoot_Ctrl_Cmd_s));
+    float magnitude = fabsf((float)value);
+    if (magnitude <= GIMBAL_RC_DEADBAND) return 0.0f;
+    float fraction = (magnitude - GIMBAL_RC_DEADBAND) /
+                     (GIMBAL_RC_FULL_SCALE - GIMBAL_RC_DEADBAND);
+    return copysignf(fminf(fraction, 1.0f) * maximum * GIMBAL_RAD_PER_DEG, (float)value);
+}
+#endif
 
-    // 初始化控制命令的默认值
-    chassis_cmd_send.vx = 0;
-    chassis_cmd_send.vy = 0;
-    chassis_cmd_send.wz = 0;
-
-    gimbal_cmd_send.yaw = YAW_CHASSIS_ALIGN_DEG;
-    gimbal_cmd_send.pitch = PITCH_HORIZON_RAD;
-
-    shoot_cmd_send.shoot_mode = SHOOT_OFF; // 初始状态关闭发射
-    shoot_cmd_send.load_mode = LOAD_STOP;  // 初始状态停止拨盘
-    shoot_cmd_send.shoot_rate = 1.0f;    // 初始射频1发/秒
+void RobotCMDInit(void)
+{
+    (void)RemoteControlInit(&huart5);
+    gimbal_cmd_pub = PubRegister("gimbal_manual", sizeof(Gimbal_Manual_Cmd_s));
+#if GIMBAL_KEY_MOUSE_ENABLED
+    GimbalKeyMouseInit(&key_mouse);
+#endif
 }
 
-static void RemoteControlSet()
+void RobotCMDTask(void)
 {
-    chassis_cmd_send.vx = 0.003f * (float)rc_data[TEMP].rc.rocker_l1;  // 左垂直摇杆
-    chassis_cmd_send.vy = 0; // 暂时设置为0
-    chassis_cmd_send.wz = -0.005f * (float)rc_data[TEMP].rc.rocker_l_; // 左水平摇杆
-    // chassis_cmd_send.wz = -0.005f * (float)rc_data[TEMP].rc.rocker_r_; // 右水平摇杆
-
-    gimbal_cmd_send.yaw += 0.0001f * (float)rc_data[TEMP].rc.rocker_r_;  // 右水平摇杆
-    gimbal_cmd_send.pitch += 0.0001f * (float)rc_data[TEMP].rc.rocker_r1;  // 右垂直摇杆
-
-    // 摩擦轮控制,拨轮向上打为负,向下为正
-    // DT7遥控器的拨轮很容易坏,请注意
-    if (rc_data[TEMP].rc.dial < -100) // 向上超过100,打开摩擦轮
+    RC_ctrl_t rc = {0};
+    Gimbal_Manual_Cmd_s cmd = {0};
+#if GIMBAL_KEY_MOUSE_ENABLED
+    uint32_t age_ms;
+    cmd.online = RemoteControlGetSnapshotWithAge(&rc, &age_ms);
+#else
+    cmd.online = RemoteControlGetSnapshot(&rc);
+#endif
+    cmd.timestamp_ms = HAL_GetTick();
+    cmd.switch_left = rc.rc.switch_left;
+    cmd.switch_right = rc.rc.switch_right;
+    cmd.stick_yaw = rc.rc.rocker_r_;
+    cmd.stick_pitch = rc.rc.rocker_r1;
+    /* Down: everyday dual-axis control; mid/up retain single-axis diagnostics. */
+    cmd.request.axis_mask = switch_is_down(rc.rc.switch_left) ? 3U :
+                            (switch_is_mid(rc.rc.switch_left) ? 2U : 1U);
+#if GIMBAL_KEY_MOUSE_ENABLED
+    GimbalKeyMouseApply(&key_mouse, &rc, age_ms, &cmd);
+#else
+    cmd.request.sticks_centered = fabsf((float)cmd.stick_yaw) <= GIMBAL_RC_DEADBAND &&
+                                  fabsf((float)cmd.stick_pitch) <= GIMBAL_RC_DEADBAND;
+    if (cmd.online)
     {
-        shoot_cmd_send.shoot_mode = SHOOT_ON;
-        shoot_cmd_send.friction_mode = FRICTION_ON;
-    } else{
-        shoot_cmd_send.shoot_mode = SHOOT_OFF;
-        shoot_cmd_send.friction_mode = FRICTION_OFF;
+        if (switch_is_mid(rc.rc.switch_right)) cmd.request.mode = GIMBAL_REQUEST_HOLD;
+        if (switch_is_up(rc.rc.switch_right)) cmd.request.mode = GIMBAL_REQUEST_MANUAL;
+        cmd.request.rate[0] = GIMBAL_YAW_COMMAND_SIGN * StickRate(cmd.stick_yaw, GIMBAL_YAW_MAX_SPEED_DPS);
+        cmd.request.rate[1] = GIMBAL_PITCH_COMMAND_SIGN * StickRate(cmd.stick_pitch, GIMBAL_PITCH_MAX_SPEED_DPS);
     }
-    // 拨弹控制,遥控器固定为一种拨弹模式,可自行选择
-    if (rc_data[TEMP].rc.dial < -500)
-        shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
-    else
-        shoot_cmd_send.load_mode = LOAD_STOP;
-}
-void RobotCMDTask()
-{
-    // 从底盘应用接收反馈信息
-    SubGetMessage(chassis_feed_sub, (void *)&chassis_fetch_data);
-    
-    // 计算遥控器输入的控制量
-    RemoteControlSet();
-    
-    // 发送控制信息给底盘应用
-    PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);
-
-    // 发送控制信息给云台应用
-    PubPushMessage(gimbal_cmd_pub, (void *)&gimbal_cmd_send);
-
-    // 发送控制信息给发射应用
-    PubPushMessage(shoot_cmd_pub, (void *)&shoot_cmd_send);
+#endif
+    PubPushMessage(gimbal_cmd_pub, &cmd);
 }

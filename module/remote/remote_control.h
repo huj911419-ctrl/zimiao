@@ -125,10 +125,24 @@ RC_ctrl_t *RemoteControlInit(UART_HandleTypeDef *rc_usart_handle);
 
 /**
  * @brief 检查遥控器是否在线,若尚未初始化也视为离线
- * 由于暂时没有启用Daemon,所以该函数暂时无效
+ * Validated frame freshness is checked independently of Daemon.
  *
  * @return uint8_t 1:在线 0:离线
  */
 uint8_t RemoteControlIsOnline();
+
+/** @brief Copy one coherent RC sample; returns 0 on invalid/offline input. */
+uint8_t RemoteControlGetSnapshot(RC_ctrl_t *sample);
+/** @brief Coherent sample plus last-valid-frame age; age_ms may be NULL. */
+uint8_t RemoteControlGetSnapshotWithAge(RC_ctrl_t *sample, uint32_t *age_ms);
+
+typedef struct {
+    uint32_t age_ms, good_frames, bad_frames;
+    uint32_t uart_errors, last_uart_error, receive_retries, start_failures;
+    uint16_t last_length;
+    uint8_t online, bad_reason; /* 0 none, 1 length, 2 switch, 3 mouse, 4 channel */
+} Remote_Control_Diagnostics_s;
+/** @brief Read validated-frame freshness and UART diagnostics without changing arming. */
+void RemoteControlGetDiagnostics(Remote_Control_Diagnostics_s *diagnostics);
 
 #endif

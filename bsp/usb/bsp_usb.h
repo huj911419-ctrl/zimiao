@@ -1,15 +1,9 @@
 /**
  * @file bsp_usb.h
- * @author your name (you@domain.com)
- * @brief 提供对usb vpc(virtal com port)的操作接口,hid和msf考虑后续添加
- * @attention 这一版usb修改了usbd_cdc_if.c中的CDC_Receive_FS函数,若使用cube生成后会被覆盖.后续需要由usbcdciftemplate创建一套自己的模板
- * @version 0.1
- * @date 2023-02-09
- *
- * @copyright Copyright (c) 2023
- *
+ * @brief USB CDC(VCP) BSP.
  */
 #pragma once
+
 #include "usb_device.h"
 #include "usbd_cdc.h"
 #include "usbd_conf.h"
@@ -22,9 +16,15 @@ typedef struct
     USBCallback rx_cbk;
 } USB_Init_Config_s;
 
-/* @note 虚拟串口的波特率/校验位/数据位等动态可变,取决于上位机的设定 */
-/* 使用时不需要关心这些设置(作为从机) */
+/* @note 虚拟串口的波特率/校验位/数据位等由上位机设置,固件侧无需固定这些参数。 */
+uint8_t *USBInit(USB_Init_Config_s usb_conf);
+uint8_t *USBGetRxBuffer(void);
 
-uint8_t *USBInit(USB_Init_Config_s usb_conf); // bsp初始化时调用会重新枚举设备
+/* USB CDC 已完成枚举时返回1。 */
+uint8_t USBIsReady(void);
 
-void USBTransmit(uint8_t *buffer, uint16_t len); // 通过usb发送数据
+/*
+ * 发送数据时内部会先复制到持久缓冲区，避免把任务栈上的临时buffer
+ * 直接交给异步USB发送。成功提交返回1，忙/未枚举/参数错误返回0。
+ */
+uint8_t USBTransmit(const uint8_t *buffer, uint16_t len);

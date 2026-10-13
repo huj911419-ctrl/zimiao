@@ -32,6 +32,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "robot.h"
+#include "bsp_init.h"
 #include "bsp_log.h"
 /* USER CODE END Includes */
 
@@ -114,10 +115,24 @@ int main(void)
   MX_TIM2_Init();
   MX_UART5_Init();
   MX_FDCAN3_Init();
-  MX_IWDG1_Init();
   /* USER CODE BEGIN 2 */
+  /*
+   * Bring up the timing/log BSP and USB CDC before application modules.
+   * This makes the virtual COM port independent of gimbal/CAN init failures.
+   */
+  BSPInit();
+  MX_USB_DEVICE_Init();
+
+  /*
+   * RobotInit() now performs the BMI088 online calibration. Start IWDG only
+   * after that blocking calibration is complete; once an STM32 IWDG is
+   * started it cannot be stopped, so starting it earlier would reset the MCU
+   * during a valid multi-second calibration.
+   */
   RobotInit();
-  LOGINFO("[main] HAL Init and RobotInit() done");
+  MX_IWDG1_Init();
+  HAL_IWDG_Refresh(&hiwdg1);
+  LOGINFO("[main] HAL Init, USB, IMU calibration and RobotInit() done");
   /* USER CODE END 2 */
 
   /* Call init function for freertos objects (in cmsis_os2.c) */

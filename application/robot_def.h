@@ -31,6 +31,8 @@ typedef enum
 {
     GIMBAL_IMU = 0,           // IMU控制云台
     GIMBAL_LOCK,              // 云台电机强制锁定到0
+    GIMBAL_MANUAL_SPEED,      // 遥控器直接给yaw/pitch目标速度（deg/s）
+    GIMBAL_ZERO_FORCE,        // 云台电机零输出，调试/失联安全状态
 } Gimbal_Mode_e;
 
 // cmd发布的底盘控制数据,由chassis订阅

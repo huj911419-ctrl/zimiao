@@ -1,0 +1,3 @@
+所以你以后固定这样用就行：
+- 只编译：Ctrl + Shift + B
+- 编译并烧录：Ctrl + Shift + P → Tasks: Run Task → 编译并烧录

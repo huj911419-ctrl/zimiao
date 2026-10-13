@@ -104,8 +104,14 @@ Core/Src/syscalls.c \
 application/chassis/agv_chassis.c \
 application/cmd/auto_cmd.c \
 application/cmd/dt7_cmd.c \
+application/cmd/gimbal_key_mouse.c \
 application/cmd/vtm_cmd.c \
 application/gimbal/2yaw_gimbal.c \
+application/gimbal/gimbal_control.c \
+application/gimbal/gimbal_runtime.c \
+application/gimbal/gimbal_imu_uart.c \
+application/gimbal/gimbal_imu_text.c \
+application/gimbal/vofa_protocol.c \
 application/shoot/auto_ammo_booster.c \
 bsp/bsp_tools.c \
 bsp/can/bsp_can.c \
@@ -269,6 +275,7 @@ C_INCLUDES =  \
 # The header path -Iapplication/$(ROBOT) is handled in C_INCLUDES; -Iapplication provides robot_def.h.
 ifeq ($(ROBOT),sentry)
 C_DEFS    += -DROBOT_SENTRY
+C_SOURCES += application/sentry/can_scan.c
 else ifeq ($(ROBOT),infantry)
 C_DEFS    += -DROBOT_INFANTRY
 else
