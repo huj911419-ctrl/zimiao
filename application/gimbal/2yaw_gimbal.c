@@ -7,6 +7,7 @@
 #include "ins_task.h"
 #include "message_center.h"
 #include "task.h"
+#include "auto_aim.h"
 #include <math.h>
 #include <string.h>
 
@@ -156,13 +157,15 @@ void GimbalTask(void)
     Gimbal_Request_s request = command.request;
     for (uint8_t i = 0U; i < 2U; ++i)
         request.rate[i] *= configs[i].speed_limit / default_configs[i].speed_limit;
+    AutoAimSelect(&request, &control, faults, stage, now);
     GimbalControlStep(&control, configs, feedback, &request, dt, faults, stage);
+    AutoAimControlResult(&control);
 
     /* One short critical section prevents the motor task seeing a half-updated command pair. */
     taskENTER_CRITICAL();
     for (uint8_t i = 0; i < 2U; ++i)
     {
-        uint8_t enabled = (control.state == GIMBAL_STATE_HOLD || control.state == GIMBAL_STATE_MANUAL) &&
+        uint8_t enabled = (control.state == GIMBAL_STATE_HOLD || control.state == GIMBAL_STATE_MANUAL || control.state == GIMBAL_STATE_AUTO) &&
                           (control.axis_mask & (1U << i));
         float command_output = enabled ? output_sign[i] * control.axis[i].output : 0.0f;
         DJIMotorSetRef(motors[i], enabled ? command_output : 0.0f);
@@ -220,7 +223,7 @@ static uint8_t CanCalibrate(void)
 {
     return command.online && command.request.mode == GIMBAL_REQUEST_OFF &&
            (uint32_t)(HAL_GetTick() - command.timestamp_ms) <= GIMBAL_COMMAND_TIMEOUT_MS &&
-           control.state != GIMBAL_STATE_HOLD && control.state != GIMBAL_STATE_MANUAL &&
+           control.state != GIMBAL_STATE_HOLD && control.state != GIMBAL_STATE_MANUAL && control.state != GIMBAL_STATE_AUTO &&
            motors[1]->rx_count && (uint32_t)(HAL_GetTick() - motors[1]->last_rx_ms) <= GIMBAL_MOTOR_TIMEOUT_MS;
 }
 
@@ -245,7 +248,7 @@ Vofa_Result_e GimbalApplyVofaCommand(const Vofa_Command_s *cmd, float *value)
     uint8_t off = command.online && command.request.mode == GIMBAL_REQUEST_OFF &&
                   command.request.sticks_centered &&
                   (uint32_t)(HAL_GetTick() - command.timestamp_ms) <= GIMBAL_COMMAND_TIMEOUT_MS &&
-                  control.state != GIMBAL_STATE_HOLD && control.state != GIMBAL_STATE_MANUAL;
+                  control.state != GIMBAL_STATE_HOLD && control.state != GIMBAL_STATE_MANUAL && control.state != GIMBAL_STATE_AUTO;
     switch (cmd->type)
     {
     case VOFA_CMD_STAGE:

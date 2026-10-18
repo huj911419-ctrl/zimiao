@@ -8,7 +8,14 @@
 #define GIMBAL_YAW_MOTOR_ID 1U
 #define GIMBAL_PITCH_MOTOR_ID 2U
 #define GIMBAL_BRINGUP_ENABLE_IMU 1U
+/* Keep normal manual-control behavior by default; binary coordinate verification
+ * may explicitly build with 0 so RC/vision cannot produce actuator output. */
+#ifndef GIMBAL_MOTOR_OUTPUT_ENABLED
 #define GIMBAL_MOTOR_OUTPUT_ENABLED 1U
+#endif
+#if GIMBAL_MOTOR_OUTPUT_ENABLED != 0 && GIMBAL_MOTOR_OUTPUT_ENABLED != 1
+#error "GIMBAL_MOTOR_OUTPUT_ENABLED must be 0 or 1"
+#endif
 /* 0: observe only, 1: rate PI tuning, 2: attitude P + rate PI. */
 /* Position hold + manual velocity feedforward; explicit centered RC OFF precedes enable. */
 #define GIMBAL_CONTROL_STAGE 2U

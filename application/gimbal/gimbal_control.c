@@ -69,15 +69,17 @@ void GimbalControlStep(Gimbal_Control_s *control, const Gimbal_Axis_Config_s con
 {
     if (!isfinite(dt) || dt <= 0.0f || dt > 0.02f) faults |= GIMBAL_FAULT_TIMING;
     if (stage > 2U || request->axis_mask == 0U || request->axis_mask > 3U ||
-        request->mode < GIMBAL_REQUEST_OFF || request->mode > GIMBAL_REQUEST_MANUAL)
+        request->mode < GIMBAL_REQUEST_OFF || request->mode > GIMBAL_REQUEST_AUTO)
         faults |= GIMBAL_FAULT_CONFIG;
+    if (request->mode == GIMBAL_REQUEST_AUTO && stage != 2U) faults |= GIMBAL_FAULT_CONFIG;
     for (uint8_t i = 0; i < 2U; ++i)
     {
         const Gimbal_Axis_Feedback_s *f = &feedback[i];
         if (!ConfigValid(&config[i]) || f->continuous_rotation > 1U) faults |= GIMBAL_FAULT_CONFIG;
         if (!isfinite(f->angle) || !isfinite(f->rate) || !isfinite(f->joint) ||
             !isfinite(f->soft_min) || !isfinite(f->soft_max) ||
-            !isfinite(f->hard_min) || !isfinite(f->hard_max) || !isfinite(request->rate[i]))
+            !isfinite(f->hard_min) || !isfinite(f->hard_max) || !isfinite(request->rate[i]) ||
+            (request->mode == GIMBAL_REQUEST_AUTO && !isfinite(request->target[i])))
             faults |= GIMBAL_FAULT_VALUE;
         if ((request->axis_mask & (1U << i)) && !f->continuous_rotation)
         {
@@ -121,7 +123,8 @@ void GimbalControlStep(Gimbal_Control_s *control, const Gimbal_Axis_Config_s con
     }
     if (request->mode != control->last_mode) ResetAxes(control, feedback);
     control->last_mode = request->mode;
-    control->state = request->mode == GIMBAL_REQUEST_HOLD ? GIMBAL_STATE_HOLD : GIMBAL_STATE_MANUAL;
+    control->state = request->mode == GIMBAL_REQUEST_AUTO ? GIMBAL_STATE_AUTO :
+        (request->mode == GIMBAL_REQUEST_HOLD ? GIMBAL_STATE_HOLD : GIMBAL_STATE_MANUAL);
     for (uint8_t i = 0; i < 2U; ++i)
     {
         Gimbal_Axis_State_s *s = &control->axis[i];
@@ -181,6 +184,13 @@ void GimbalControlStep(Gimbal_Control_s *control, const Gimbal_Axis_Config_s con
         }
         if (c->soft_recovery_speed > 0.0f && (!recovering || wanted != 0.0f || stage == 2U))
             s->rate_control_started = 1U;
+        if (request->mode == GIMBAL_REQUEST_AUTO)
+        {
+            /* Map wrapped yaw to nearest continuous feedback; absolute pitch is direct.
+             * No joystick integration or moving-goal follow-error clipping in AUTO. */
+            s->target = i == 0U ? f->angle + GimbalAngleDelta(request->target[i], f->angle) : request->target[i];
+            s->manual_rate = 0.0f;
+        }
         float previous_rate = s->manual_rate;
         s->manual_rate += Clamp(wanted - s->manual_rate, -c->acceleration_limit * dt, c->acceleration_limit * dt);
         /* Apply encoder braking to the trajectory itself, not only the final

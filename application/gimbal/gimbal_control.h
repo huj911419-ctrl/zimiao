@@ -6,9 +6,9 @@
 #define GIMBAL_CONTROL_H
 #include <stdint.h>
 #define GIMBAL_RAD_PER_DEG 0.017453292519943295f
-typedef enum { GIMBAL_REQUEST_OFF, GIMBAL_REQUEST_HOLD, GIMBAL_REQUEST_MANUAL } Gimbal_Request_e;
+typedef enum { GIMBAL_REQUEST_OFF, GIMBAL_REQUEST_HOLD, GIMBAL_REQUEST_MANUAL, GIMBAL_REQUEST_AUTO } Gimbal_Request_e;
 typedef enum { GIMBAL_STATE_OFF, GIMBAL_STATE_READY, GIMBAL_STATE_HOLD,
-               GIMBAL_STATE_MANUAL, GIMBAL_STATE_FAULT } Gimbal_State_e;
+               GIMBAL_STATE_MANUAL, GIMBAL_STATE_FAULT, GIMBAL_STATE_AUTO } Gimbal_State_e;
 typedef enum {
     GIMBAL_FAULT_NONE = 0, GIMBAL_FAULT_RC = 1U, GIMBAL_FAULT_IMU = 2U,
     GIMBAL_FAULT_MOTOR = 4U, GIMBAL_FAULT_LIMIT = 8U,
@@ -32,6 +32,7 @@ typedef struct {
     uint8_t axis_mask; /* bit 0 yaw, bit 1 pitch */
     uint8_t sticks_centered;
     float rate[2];
+    float target[2]; /* AUTO only: absolute wrapped radians, never velocity/integrated input */
 } Gimbal_Request_s;
 typedef struct {
     float target, manual_rate, rate_target, integral, output;

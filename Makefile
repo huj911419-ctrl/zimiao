@@ -108,6 +108,11 @@ application/cmd/gimbal_key_mouse.c \
 application/cmd/vtm_cmd.c \
 application/gimbal/2yaw_gimbal.c \
 application/gimbal/gimbal_control.c \
+application/auto_aim/auto_aim.c \
+application/auto_aim/auto_aim_coordinates.c \
+module/cboard/cboard_protocol.c \
+module/vision_comm/vision_comm.c \
+bsp/usb/vision_usb_port.c \
 application/gimbal/gimbal_runtime.c \
 application/gimbal/gimbal_imu_uart.c \
 application/gimbal/gimbal_imu_text.c \
@@ -200,11 +205,18 @@ MCU = $(CPU) -mthumb $(FPU) $(FLOAT-ABI)
 AS_DEFS = 
 
 # C defines
+AUTO_AIM_USB_MODE ?= 1
+AUTO_AIM_COORDINATES_CONFIRMED ?= 0
+GIMBAL_MOTOR_OUTPUT_ENABLED ?= 1
+
 C_DEFS =  \
 -DUSE_PWR_LDO_SUPPLY \
 -DUSE_HAL_DRIVER \
 -DSTM32H723xx \
--DARM_MATH_CM7
+-DARM_MATH_CM7 \
+-DAUTO_AIM_USB_MODE=$(AUTO_AIM_USB_MODE) \
+-DAUTO_AIM_COORDINATES_CONFIRMED=$(AUTO_AIM_COORDINATES_CONFIRMED) \
+-DGIMBAL_MOTOR_OUTPUT_ENABLED=$(GIMBAL_MOTOR_OUTPUT_ENABLED)
 
 
 # AS includes
@@ -243,6 +255,9 @@ C_INCLUDES =  \
 -Iapplication/chassis \
 -Iapplication/cmd \
 -Iapplication/gimbal \
+-Iapplication/auto_aim \
+-Imodule/cboard \
+-Imodule/vision_comm \
 -Iapplication/$(ROBOT) \
 -Iapplication/shoot \
 -Ibsp \
@@ -327,7 +342,7 @@ vpath %.S $(sort $(dir $(ASMM_SOURCES)))
 OBJECTS += $(addprefix $(BUILD_DIR)/,$(notdir $(ASMMC_SOURCES:.c=.o)))
 vpath %.S $(sort $(dir $(ASMMC_SOURCES)))
 
-$(BUILD_DIR)/%.o: %.c Makefile | $(BUILD_DIR) 
+$(BUILD_DIR)/%.o: %.c Makefile $(BUILD_DIR)/.build-config | $(BUILD_DIR)
 	$(CC) -c $(CFLAGS) -Wa,-a,-ad,-alms=$(BUILD_DIR)/$(notdir $(<:.c=.lst)) $< -o $@
 
 $(BUILD_DIR)/%.o: %.s Makefile | $(BUILD_DIR)
@@ -345,8 +360,16 @@ $(BUILD_DIR)/%.hex: $(BUILD_DIR)/%.elf | $(BUILD_DIR)
 $(BUILD_DIR)/%.bin: $(BUILD_DIR)/%.elf | $(BUILD_DIR)
 	$(BIN) $< $@	
 	
+.PHONY: FORCE
+FORCE:
+
+# Recompile when USB/calibration/other compile flags change in the same output directory.
+$(BUILD_DIR)/.build-config: FORCE | $(BUILD_DIR)
+	@printf '%s\n' '$(CFLAGS)' > $@.tmp
+	@if cmp -s $@.tmp $@; then rm $@.tmp; else mv $@.tmp $@; fi
+
 $(BUILD_DIR):
-	mkdir $@		
+	mkdir -p $@
 
 #######################################
 # clean up

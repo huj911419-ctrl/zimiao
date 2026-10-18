@@ -34,3 +34,7 @@ No first-party host unit test framework is configured. Treat a clean `make` as t
 ## Commit & Pull Request Guidelines
 
 Recent history follows Conventional Commits: `feat:`, `fix:`, `chore:`, `doc:`, and `feat!:` for breaking changes. Keep commits scoped and mention tuned parameters or affected modules when relevant, for example `fix: update gimbal PID`. Pull requests should describe the change, list build/hardware validation, link issues when available, and call out CubeMX regeneration, linker changes, protocol changes, or calibration updates.
+
+## Ubuntu 烧录工具（本机）
+
+统一工具中心：`/home/hjj/Development/Embedded/flash-tools/README.md`。使用 DAPLink/OpenOCD、ST-LINK/STM32CubeProgrammer、ARM-GCC 前先查阅；安全观察版编译用 `flash-tools/bin/build-vision-observe`；烧录需用户现场核对并批准 SHA256。

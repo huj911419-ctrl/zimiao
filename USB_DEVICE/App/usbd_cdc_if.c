@@ -265,11 +265,11 @@ static int8_t CDC_Control_HS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_HS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 11 */
-  USBD_CDC_SetRxBuffer(&hUsbDeviceHS, &Buf[0]);
-  USBD_CDC_ReceivePacket(&hUsbDeviceHS);
-
+  /* carm_linkcoure: copy received bytes before rearming the shared RX buffer. */
   if(rx_cbk)
     rx_cbk(*Len);
+  USBD_CDC_SetRxBuffer(&hUsbDeviceHS, &Buf[0]);
+  USBD_CDC_ReceivePacket(&hUsbDeviceHS);
   
   return (USBD_OK);
   /* USER CODE END 11 */
@@ -287,6 +287,10 @@ uint8_t CDC_Transmit_HS(uint8_t* Buf, uint16_t Len)
   uint8_t result = USBD_OK;
   /* USER CODE BEGIN 12 */
   USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*)hUsbDeviceHS.pClassData;
+  /* The USB class may be absent before enumeration or after unplug. */
+  if (hUsbDeviceHS.dev_state != USBD_STATE_CONFIGURED || hcdc == NULL){
+    return USBD_FAIL;
+  }
   if (hcdc->TxState != 0){
     return USBD_BUSY;
   }

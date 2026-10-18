@@ -2,6 +2,7 @@
 #include "dt7_cmd.h"
 #include "2yaw_gimbal.h"
 #include "gimbal_manual_config.h"
+#include "auto_aim_config.h"
 #include "message_center.h"
 #include "remote_control.h"
 #include "gimbal_key_mouse_config.h"
@@ -59,11 +60,13 @@ void RobotCMDTask(void)
                                   fabsf((float)cmd.stick_pitch) <= GIMBAL_RC_DEADBAND;
     if (cmd.online)
     {
-        if (switch_is_mid(rc.rc.switch_right)) cmd.request.mode = GIMBAL_REQUEST_HOLD;
+        if (switch_is_mid(rc.rc.switch_right)) cmd.request.mode = AUTO_AIM_USB_MODE ? GIMBAL_REQUEST_AUTO : GIMBAL_REQUEST_HOLD;
         if (switch_is_up(rc.rc.switch_right)) cmd.request.mode = GIMBAL_REQUEST_MANUAL;
         cmd.request.rate[0] = GIMBAL_YAW_COMMAND_SIGN * StickRate(cmd.stick_yaw, GIMBAL_YAW_MAX_SPEED_DPS);
         cmd.request.rate[1] = GIMBAL_PITCH_COMMAND_SIGN * StickRate(cmd.stick_pitch, GIMBAL_PITCH_MAX_SPEED_DPS);
     }
 #endif
+    if (AUTO_AIM_USB_MODE && cmd.online && cmd.request.mode == GIMBAL_REQUEST_HOLD &&
+        switch_is_mid(rc.rc.switch_right)) cmd.request.mode = GIMBAL_REQUEST_AUTO;
     PubPushMessage(gimbal_cmd_pub, &cmd);
 }

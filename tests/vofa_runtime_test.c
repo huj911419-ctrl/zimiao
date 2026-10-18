@@ -21,8 +21,13 @@ static uint8_t usb_rx[1024], last_frame[VOFA_FRAME_SIZE];
 static char last_packet[1025];
 static uint16_t last_length;
 static void (*rx_callback)(uint16_t);
+static void (*tx_callback)(uint16_t);
+static USBD_CDC_HandleTypeDef usb_class;
+USBD_HandleTypeDef hUsbDeviceHS = { .pClassData = &usb_class, .dev_state = USBD_STATE_CONFIGURED };
 static unsigned frames_sent;
 static uint8_t usb_busy;
+static uint8_t usb_ready = 1U, imu_calibrated = 1U;
+static uint32_t imu_stale_ms;
 static float imu_roll;
 static float imu_yaw, imu_pitch;
 static float imu_pitch_rate;
@@ -48,7 +53,7 @@ attitude_t *INS_Init(void) { static attitude_t state; return &state; }
 uint8_t INS_GetVisionSnapshot(INS_Vision_Snapshot_t *sample)
 {
     *sample = (INS_Vision_Snapshot_t){.q={1,0,0,0},.roll=imu_roll,.yaw=imu_yaw,.pitch=imu_pitch,
-        .timestamp_ms=tick,.sample_seq=tick,.valid=1,.calibrated=1,.gyro={imu_pitch_rate,0,imu_yaw_rate},
+        .timestamp_ms=tick-imu_stale_ms,.sample_seq=tick-imu_stale_ms,.valid=1,.calibrated=imu_calibrated,.gyro={imu_pitch_rate,0,imu_yaw_rate},
         .sensor_gyro={0.1f,-0.2f,0.3f},.sensor_accel={1.0f,2.0f,9.5f}};
     return 1;
 }
@@ -72,9 +77,9 @@ void RemoteControlGetDiagnostics(Remote_Control_Diagnostics_s *sample)
     *sample=(Remote_Control_Diagnostics_s){.age_ms=14,.good_frames=123,.bad_frames=2,
         .last_length=9,.bad_reason=1,.uart_errors=3,.last_uart_error=8,.receive_retries=4,.start_failures=5};
 }
-uint8_t *USBInit(USB_Init_Config_s cfg) { rx_callback=cfg.rx_cbk; return usb_rx; }
+uint8_t *USBInit(USB_Init_Config_s cfg) { rx_callback=cfg.rx_cbk; tx_callback=cfg.tx_cbk; return usb_rx; }
 uint8_t *USBGetRxBuffer(void) { return usb_rx; }
-uint8_t USBIsReady(void) { return 1; }
+uint8_t USBIsReady(void) { return usb_ready; }
 uint8_t USBTransmit(const uint8_t *data,uint16_t length)
 {
     assert(length>0 && length<sizeof(last_packet));
@@ -82,6 +87,13 @@ uint8_t USBTransmit(const uint8_t *data,uint16_t length)
     memcpy(last_packet,data,length); last_packet[length]='\0'; last_length=length;
     if (length==VOFA_FRAME_SIZE) memcpy(last_frame,data,length);
     ++frames_sent; return 1;
+}
+uint8_t CDC_Transmit_HS(uint8_t *data,uint16_t length)
+{
+    if (!usb_ready) return USBD_FAIL;
+    if (!USBTransmit(data,length)) return USBD_BUSY;
+    if (tx_callback) tx_callback(length);
+    return USBD_OK;
 }
 QueueHandle_t xQueueCreate(unsigned length,unsigned size)
 {
@@ -120,6 +132,8 @@ static float Channel(unsigned index)
 static void Step(void)
 {
     ++tick;
+    hUsbDeviceHS.dev_state = usb_ready ? USBD_STATE_CONFIGURED : 0U;
+    hUsbDeviceHS.pClassData = usb_ready ? &usb_class : NULL;
     motor[0].last_rx_ms=motor[1].last_rx_ms=tick;
     GimbalRuntimeControl();
 }

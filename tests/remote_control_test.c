@@ -5,6 +5,7 @@
 #include "dt7_cmd.h"
 #include "2yaw_gimbal.h"
 #include "gimbal_manual_config.h"
+#include "auto_aim_config.h"
 #include <assert.h>
 #include <math.h>
 #include <string.h>
@@ -70,7 +71,7 @@ int main(void)
     assert(command.request.axis_mask==3);
     assert(fabsf(command.request.rate[1]/GIMBAL_RAD_PER_DEG+GIMBAL_PITCH_MAX_SPEED_DPS)<0.001f);
     Frame(20,-20,RC_SW_UP,RC_SW_MID); Receive();
-    assert(command.request.mode==GIMBAL_REQUEST_HOLD && command.request.axis_mask==1);
+    assert(command.request.mode==(AUTO_AIM_USB_MODE ? GIMBAL_REQUEST_AUTO : GIMBAL_REQUEST_HOLD) && command.request.axis_mask==1);
     assert(command.request.sticks_centered && command.request.rate[0]==0 && command.request.rate[1]==0);
     Frame(GIMBAL_RC_DEADBAND,-GIMBAL_RC_DEADBAND,RC_SW_DOWN,RC_SW_UP); Receive();
     assert(command.request.sticks_centered && command.request.rate[0]==0 && command.request.rate[1]==0);

@@ -4,6 +4,9 @@
  * the control task alone changes control configuration.
  */
 #include "gimbal_runtime.h"
+#include "auto_aim.h"
+#include "auto_aim_config.h"
+#include "vision_usb_port.h"
 #include "2yaw_gimbal.h"
 #include "gimbal_manual_config.h"
 #include "gimbal_imu_text.h"
@@ -53,7 +56,7 @@ static Vofa_Reply_s reply = {
 uint8_t GimbalRuntimeTextIsStreaming(void)
 {
     taskENTER_CRITICAL();
-    uint8_t enabled = reply.imu_text && reply.streaming;
+    uint8_t enabled = !AUTO_AIM_USB_MODE && reply.imu_text && reply.streaming;
     taskEXIT_CRITICAL();
     return enabled;
 }
@@ -85,18 +88,24 @@ void GimbalRuntimeInit(void)
     HAL_GPIO_WritePin(POWER_24V_1_GPIO_Port, POWER_24V_1_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(POWER_24V_2_GPIO_Port, POWER_24V_2_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(POWER_5V_GPIO_Port, POWER_5V_Pin, GPIO_PIN_SET);
+    AutoAimInit();
     GimbalInit();
     RobotCMDInit();
     command_queue = xQueueCreate(COMMAND_QUEUE_LENGTH, sizeof(Queued_Command_s));
     configASSERT(command_queue != NULL);
-    USB_Init_Config_s usb = {.tx_cbk = NULL, .rx_cbk = UsbReceive};
-    (void)USBInit(usb);
+    if (AUTO_AIM_USB_MODE) VisionUSBPortInit();
+    else
+    {
+        USB_Init_Config_s usb = {.tx_cbk = NULL, .rx_cbk = UsbReceive};
+        (void)USBInit(usb);
+    }
 }
 
 void GimbalRuntimeControl(void)
 {
     RobotCMDTask();
     GimbalTask();
+    if (AUTO_AIM_USB_MODE) return;
     Queued_Command_s queued;
     /* Apply at most one command per control tick; no parsing or float formatting here. */
     if (xQueueReceive(command_queue, &queued, 0U) != pdPASS) return;
@@ -208,8 +217,28 @@ static void ReceiveCommands(void)
     }
 }
 
+static void ReceiveCBoard(void)
+{
+    uint8_t bytes[64];
+    for (uint16_t batch = 0U; batch < VISION_USB_PORT_RX_SIZE / sizeof(bytes); ++batch)
+    {
+        uint32_t received_ms;
+        uint8_t reset_stream;
+        uint16_t length = VisionUSBPortRead(bytes, sizeof(bytes), &received_ms, &reset_stream);
+        if (reset_stream) AutoAimInvalidate();
+        if (!length) break;
+        for (uint16_t i = 0U; i < length; ++i) AutoAimReceiveByte(bytes[i], received_ms);
+    }
+}
+
 void GimbalRuntimeComm(void)
 {
+    if (AUTO_AIM_USB_MODE)
+    {
+        ReceiveCBoard();
+        AutoAimComm();
+        return;
+    }
     static uint32_t last_ms;
     static uint32_t sent_sequence;
     static uint8_t frame[1024U]; /* USB BSP owns a 1024-byte asynchronous staging buffer. */
