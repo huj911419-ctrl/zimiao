@@ -1,4 +1,99 @@
-# Meta-Embedded-NG
+# zimiao · STM32H723 GM6020 双轴云台与自瞄接入
+
+## 项目详解
+
+本仓库是 **DM-MC02 / STM32H723 的电控固件**，以 GM6020 双轴云台为主，接入 BMI088 姿态、DT7 遥控、USB CBoard 协议和上位机绝对目标角。目标识别与视觉解算位于外部视觉工程，不在本仓库内。
+
+详细接入说明见 [自瞄跟随](application/auto_aim/README.md)，已有实机记录与未完成事项见 [视觉联调状态](docs/VISION_INTEGRATION_STATUS.md)。`fashejigou` 中的 J4310 单轴速度台架属于另一项目，不能替代本工程。
+
+### 已实现与已验证分别是什么
+
+- **源码已有**：双轴控制、姿态/状态遥测、USB 目标帧解析、四元数坐标转换、目标时效、遥控模式、限位与故障约束。
+- **仓库记录的实机验证**：2026-10-18 的观察版完成 STM32 → Ubuntu 姿态/状态收发与手动四方向坐标核对。
+- **尚未完成的实机验证**：真实视觉目标 → MCU → 电机的闭环跟随，相机内外参及机械零位仍需确认。
+- **发射机构未接入**：收到 `shoot=1` 只记录，不应触发发射。15 m/s 联调弹速是配置假设值，不是测速结果。
+
+上述实机记录对应当次观察版，不能用于推定设备此刻烧录的固件或参数。
+
+### 核心数据流与文件
+
+```text
+BMI088 → INS 一致快照 → 四元数变换 → USB 姿态/状态上报
+USB 目标帧 → 字节流解析/邮箱 → 时效与控制条件 → 云台目标
+DT7 模式 ────────────────────→ 授权与状态切换
+云台角度外环 → 速度 PI → GM6020 输出、限位与故障处理
+```
+
+| 路径 | 职责 |
+| --- | --- |
+| [Core/Src/main.c](Core/Src/main.c) | 外设、机器人初始化、标定后启动看门狗与调度器 |
+| [application/auto_aim/](application/auto_aim/) | 目标接收、会话、坐标变换和遥测 |
+| [application/gimbal/gimbal_control.c](application/gimbal/gimbal_control.c) | 双轴控制与保护核心 |
+| [application/gimbal/gimbal_runtime.c](application/gimbal/gimbal_runtime.c) | 控制任务与传输/状态的运行装配 |
+| [application/cmd/dt7_cmd.c](application/cmd/dt7_cmd.c) | 遥控模式与输入映射 |
+| [module/imu/ins_task.c](module/imu/ins_task.c) | 姿态采样与快照 |
+| [module/cboard/cboard_protocol.c](module/cboard/cboard_protocol.c) | CBoard 字节协议 |
+| [bsp/usb/vision_usb_port.c](bsp/usb/vision_usb_port.c) | USB 连接、接收队列与发送适配 |
+| [tests/run_tests.py](tests/run_tests.py) | 主机编译与回归入口 |
+
+### 通信约定
+
+| 方向 | 帧 | 字节数 | 主要字段 |
+| --- | --- | ---: | --- |
+| 电控 → 上位机 | AA | 10 | `AA + w,x,y,z(int16×4) + DD` |
+| 电控 → 上位机 | BB | 9 | `BB + speed,mode,shoot_mode,ft_angle(int16×4)`，无帧尾 |
+| 上位机 → 电控 | CC | 8 | `CC + control(u8) + shoot(u8) + yaw(i16) + pitch(i16) + EE` |
+
+多字节字段小端；姿态分量与目标角乘以 10000，目标角单位 rad；速度乘以 100。目标为绝对角度，不是摇杆式角速度积分。该协议没有 CRC，合法性检查不能发现全部负载位翻转。
+
+最后有效视觉目标超过 150 ms、USB 断开或溢出时撤销目标；`control=0` 不代表云台回零。无效帧不能刷新目标有效期，旧模式/旧会话目标不能在下一次自瞄中复用。具体保持、停机和故障行为以当前控制状态及专项说明为准。
+
+### 先选择构建模式
+
+需要 GNU Arm Embedded 工具链、Make 和 Python 3。普通 `make` 的 `GIMBAL_MOTOR_OUTPUT_ENABLED` 默认值是 **1**；`AUTO_AIM_COORDINATES_CONFIRMED=0` 只限制视觉接管，不等于禁止手动电机输出。
+
+初次做姿态/通信观察时，显式构建禁用电机输出的版本，并使用独立输出目录：
+
+```bash
+git clone https://github.com/huj911419-ctrl/zimiao.git
+cd zimiao
+make -j8 ROBOT=sentry BUILD_DIR=build/vision-observe \
+  AUTO_AIM_USB_MODE=1 AUTO_AIM_COORDINATES_CONFIRMED=0 \
+  GIMBAL_MOTOR_OUTPUT_ENABLED=0
+```
+
+产物前缀为 `build/vision-observe/Meta-Embedded-NG-sentry`，包含 `.elf/.hex/.bin`。工具链不在 PATH 时加 `GCC_PATH=/实际工具链/bin`。命令只编译，不连接或烧录开发板。
+
+| 构建参数 | 用途 |
+| --- | --- |
+| `ROBOT=sentry/infantry` | 选择机器人入口；哨兵额外包含被动 CAN 扫描 |
+| `AUTO_AIM_USB_MODE=1` | CBoard 二进制 USB；0 为原调试模式 |
+| `AUTO_AIM_COORDINATES_CONFIRMED=0` | 安装坐标和标定尚未确认时禁止视觉接管 |
+| `GIMBAL_MOTOR_OUTPUT_ENABLED=0` | 观察版禁止电机输出；普通默认构建并非此配置 |
+
+不要仅为获得 `mode=1` 而开启坐标确认。完整标定和实际控制验收完成后，才有依据调整对应配置。
+
+### 遥控与配置入口
+
+CBoard 模式下，右拨杆下档为 OFF、中档请求 AUTO、上档为手动；左拨杆下档选择双轴。AUTO 还受到坐标确认、阶段、反馈、USB、遥控和联调参数等条件限制，拨杆位置本身不保证进入自动跟随。
+
+- [auto_aim_config.h](application/auto_aim/auto_aim_config.h)：协议模式、世界/机体/Solver 变换、超时与联调弹速。
+- [gimbal_manual_config.h](application/gimbal/gimbal_manual_config.h)：手动云台参数、限制和输出开关。
+- [联调状态](docs/VISION_INTEGRATION_STATUS.md)：坐标方向、安装标定和真实闭环的证据边界。
+
+### 主机验证与阅读顺序
+
+```bash
+python3 tests/run_tests.py
+```
+
+主机回归使用本机 GCC 和替身接口，覆盖协议、坐标、USB、模式、过期目标及控制保护；它不能代替真实相机、电机和动态跟随验收。
+
+建议先看联调状态与自瞄 README，再看配置、`auto_aim.*`、`gimbal_control.*`、运行装配和相应测试。MIT 许可证及上游框架致谢保留在 [LICENSE](LICENSE) 和下文。
+
+---
+
+以下为原有机器人框架中英文介绍。首次构建模式与自瞄阶段请先按上面的项目说明选择。
 
 > 面向达妙 **DM-MC02（STM32H723VGT6）** 控制板的 RoboMaster 机器人电控固件。
 > RoboMaster robot control firmware for the DaMiao **DM-MC02 (STM32H723VGT6)** board.
@@ -77,11 +172,11 @@ Meta-Embedded-NG/
 
 依赖 **GNU Arm Embedded 工具链**（`arm-none-eabi-gcc`）。
 
-> ⚠️ **首次构建前请手动创建 `build/` 目录**。Makefile 的 `mkdir` 规则不会自动创建父目录，全新检出的仓库若没有 `build/`，构建会报错 `mkdir: cannot create directory 'build/<robot>'`。
+> 当前 Makefile 会自动创建构建输出目录。也可预先执行 `mkdir -p build`，重复执行不会报错。
 
 ```bash
-# 首次构建前手动创建 build 目录（若已存在可跳过）
-mkdir build
+# 可选：预先创建构建目录
+mkdir -p build
 
 # 按机器人种类构建（ROBOT 默认为 sentry）
 # -j 启用并行编译；可用 -j<N> 限制并发数，如 -j8
@@ -190,11 +285,11 @@ Most submodules ship with a companion `*.md` doc (e.g. `module/message_center/me
 
 Requires the **GNU Arm Embedded toolchain** (`arm-none-eabi-gcc`).
 
-> ⚠️ **Create the `build/` directory before your first build.** The Makefile's `mkdir` rule does not create parent directories, so a fresh checkout without `build/` fails with `mkdir: cannot create directory 'build/<robot>'`.
+> The current Makefile creates output directories automatically. An optional `mkdir -p build` is safe to repeat.
 
 ```bash
-# One-time: create the build directory before the first build (skip if it exists)
-mkdir build
+# Optional: create the build directory in advance
+mkdir -p build
 
 # Build per robot variant (ROBOT defaults to sentry)
 # -j enables parallel compilation; pass -j<N> to cap the job count, e.g. -j8
